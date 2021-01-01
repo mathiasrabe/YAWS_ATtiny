@@ -34,9 +34,9 @@
 
 
 // variable to save the content of the ADC for later
-byte saveADCSRA;
+volatile byte saveADCSRA;
 // save the battery voltage
-uint16_t vcc = 0;
+volatile uint16_t vcc = 0;
 // The "registers" we expose to I2C
 volatile uint8_t i2c_regs[] = {
     0x0, // status register, shows how many VCC measurements were made - only the last one will be stored in register 3 and 4

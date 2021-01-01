@@ -24,6 +24,7 @@
 #include <TinyWireS.h>
 
 #define VCCMIN 3700 // mV - minimum voltage of VCC power supply
+#define VCCMAX 4200 // mV - maximum voltage of VCC power supply - if exceeded, we will consume some more power
 #define V1V1REF 1117 // mV - actual voltage of internal 1V1 reference - should be measured and changed TODO: make this adjustable via I2C
 #define I2C_SLAVE_ADDRESS 0x4 // the 7-bit I2C address
 // The default buffer size, though we cannot actually affect it by defining it in the sketch
@@ -32,7 +33,10 @@
 #endif
 
 
-byte saveADCSRA;  // variable to save the content of the ADC for later
+// variable to save the content of the ADC for later
+byte saveADCSRA;
+// save the battery voltage
+uint16_t vcc = 0;
 // The "registers" we expose to I2C
 volatile uint8_t i2c_regs[] = {
     0x0, // status register, shows how many VCC measurements were made - only the last one will be stored in register 3 and 4
@@ -61,6 +65,15 @@ void resetI2CRegs() {  // set all registers to 0, except the sleep register
   for (uint8_t i=0; i < reg_size; i++) {
     if (i == 1) continue;  // sleep register should bot be overwritten
     i2c_regs[i] = 0x0;
+  }
+}
+
+void activeSleepNow() {
+  // consume some power to reduce battery voltage
+  while (i2c_regs[1] != 0) {
+    digitalWrite( PB3, LOW );  // disable 3.3V
+    delay(8000);  // ms
+    i2c_regs[1]--;  // decrease the sleep register (WDog firing counter).
   }
 }
 
@@ -197,7 +210,11 @@ void loop() {
   if ( i2c_regs[1] != 0 ) {
     // go to sleep if the sleep register is not zero
     //blink(1);
-    sleepNow();  // then set up and enter sleep mode
+    if (vcc > VCCMAX) {
+      activeSleepNow();  // consume some power to reduce battery voltage
+    } else {
+      sleepNow();  // enter sleep mode
+    }
     return;
   }
   if (convertVCC) {
@@ -206,7 +223,7 @@ void loop() {
     readVCC = true;  // VCC needs to be read after conversion
   }
   if (!VCCconversionInProgress() && readVCC) {
-    uint16_t vcc = getVCC();
+    vcc = getVCC();
     readVCC = false;  // we don't need to read it again if there was no convertion
 
     if ( vcc < VCCMIN ) {

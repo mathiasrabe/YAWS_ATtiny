@@ -5,7 +5,7 @@
  *              _________
  *       Reset o 1     8 o VCC
  *  SHDN / PB3 o 2     7 o PB2 / SCL
- *         PB4 o 3     6 o PB1
+ *  5VEN / PB4 o 3     6 o PB1
  *         GND o 4     5 o PB0 / SDA
  *              ---------
  * 
@@ -24,7 +24,8 @@
 #include <TinyWireS.h>
 
 #define VCCMIN 3700 // mV - minimum voltage of VCC power supply
-#define VCCMAX 4200 // mV - maximum voltage of VCC power supply - if exceeded, we will consume some more power
+#define VCCMAX 4200 // mV - maximum voltage of VCC power supply - if exceeded, we will disabke battery charging
+#define VCCHYST 4000 // mV - if below this level we will enable battery charging again
 #define V1V1REF 1117 // mV - actual voltage of internal 1V1 reference - should be measured and changed TODO: make this adjustable via I2C
 #define I2C_SLAVE_ADDRESS 0x4 // the 7-bit I2C address
 // The default buffer size, though we cannot actually affect it by defining it in the sketch
@@ -172,6 +173,8 @@ void setup() {
   noInterrupts();
 
   pinMode( PB3, OUTPUT );  // SHDN to enable 3.3V
+  pinMode( PB4, OUTPUT );  // 5VEN to enable battery charging
+  digitalWrite( PB4, HIGH );  // enable battery charging until we have a measurement
 
   // configure the ADC to read internal 1V1 reference against VCC
   #if defined(__AVR_ATtiny84__) || defined(__AVR_ATtiny44__)
@@ -225,6 +228,14 @@ void loop() {
   if (!VCCconversionInProgress() && readVCC) {
     vcc = getVCC();
     readVCC = false;  // we don't need to read it again if there was no convertion
+
+    if ( vcc <= VCCHYST ) {
+      // enable battery charging if voltage is too low
+      digitalWrite( PB4, HIGH );
+    } else if ( vcc >= VCCMAX ) {
+      // disable battery charging if voltage is too high
+      digitalWrite( PB4, LOW );
+    }
 
     if ( vcc < VCCMIN ) {
       // if the voltage is to low

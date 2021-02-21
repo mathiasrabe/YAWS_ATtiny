@@ -21,12 +21,9 @@
 #include <avr/sleep.h>
 #include <avr/power.h>
 #include <avr/wdt.h>
+#include <EEPROM.h>
 #include <TinyWireS.h>
 
-#define VCCMIN 3700 // mV - minimum voltage of VCC power supply
-#define VCCMAX 4200 // mV - maximum voltage of VCC power supply - if exceeded, we will disabke battery charging
-#define VCCHYST 4000 // mV - if below this level we will enable battery charging again
-#define V1V1REF 1117 // mV - actual voltage of internal 1V1 reference - should be measured and changed TODO: make this adjustable via I2C
 #define I2C_SLAVE_ADDRESS 0x4 // the 7-bit I2C address
 // The default buffer size, though we cannot actually affect it by defining it in the sketch
 #ifndef TWI_RX_BUFFER_SIZE
@@ -38,12 +35,35 @@
 volatile byte saveADCSRA;
 // save the battery voltage
 volatile uint16_t vcc = 0;
+// enum variables for i2c_regs
+enum i2c_reg_names {
+    STATUS = 0,
+    SLEEP = 1,
+    VCC_LO = 2,
+    VCC_HI = 3,
+    V1VREF_LO = 4,
+    V1VREF_HI = 5,
+    VCCMIN_LO = 6,
+    VCCMIN_HI = 7,
+    VCCMAX_LO = 8,
+    VCCMAX_HI = 9,
+    VCCHYST_LO = 10,
+    VCCHYST_HI = 11
+};
 // The "registers" we expose to I2C
 volatile uint8_t i2c_regs[] = {
-    0x0, // status register, shows how many VCC measurements were made - only the last one will be stored in register 3 and 4
-    0x0, // sleep register, !=0 means that the ATtiny should disable 3.3V and going to sleep for 8sec times this register
-    0x0, // low byte of VCC
-    0x0, // high byte of VCC
+    [STATUS] = 0x0, // status register, the first bit is 1 if VCC was measured; the second bit shows if the EEPROM is conditioned
+    [SLEEP] = 0x0, // sleep register, !=0 means that the ATtiny should disable 3.3V and going to sleep for 8sec times this register
+    [VCC_LO] = 0x0, // low byte of VCC
+    [VCC_HI] = 0x0, // high byte of VCC
+    [V1VREF_LO] = 0x0, // low byte of V1VREF
+    [V1VREF_HI] = 0x0, // high byte of V1VREF
+    [VCCMIN_LO] = 0x0, // low byte of VCCMIN
+    [VCCMIN_HI] = 0x0, // high byte of VCCMIN
+    [VCCMAX_LO] = 0x0, // low byte of VCCMAX
+    [VCCMAX_HI] = 0x0, // high byte of VCCMAX
+    [VCCHYST_LO] = 0x0, // low byte of VCCHYST
+    [VCCHYST_HI] = 0x0, // high byte of VCCHYST
 };
 const byte reg_size = sizeof(i2c_regs);
 // Tracks the current register pointer position
@@ -53,6 +73,16 @@ volatile bool convertVCC = true;
 // true if a conversion was started and there might be a result
 volatile bool readVCC = true;
 
+// EEPROM struct to save some variables - can be changed by I2C
+struct EEPROMVar {
+  uint8_t conditioned = 3;  // will show us if the EEPROM was conditioned and the values are reliable
+                            // 1:conditioned - 2:conditioned but has not been saved yet - 3:not conditioned
+  uint16_t v1v_ref = 1100;  // mV - actual voltage of internal 1V1 reference - should be measured and changed
+  uint16_t vcc_min = 3700;  // mV - minimum voltage of VCC power supply
+  uint16_t vcc_max = 4200;  // mV - maximum voltage of VCC power supply - if exceeded, we will disabke battery charging
+  uint16_t vcc_hyst = 4000;  // mV - if below this level we will enable battery charging again
+};
+EEPROMVar eepromVar;
 
 void resetWatchDog() {
   MCUSR = 0;
@@ -62,19 +92,52 @@ void resetWatchDog() {
   wdt_reset ();  // reset WDog to parameters
 }
 
-void resetI2CRegs() {  // set all registers to 0, except the sleep register
-  for (uint8_t i=0; i < reg_size; i++) {
-    if (i == 1) continue;  // sleep register should bot be overwritten
-    i2c_regs[i] = 0x0;
+void resetI2CRegs() {  // set VCC registers and ADC bit to 0
+  i2c_regs[STATUS] &= ~bit(0); // just reset the first ADC bit
+  i2c_regs[VCC_LO] = 0x0;
+  i2c_regs[VCC_HI] = 0x0;
+}
+
+void readEEPROM() {
+  EEPROM.get(0, eepromVar);
+  if (eepromVar.conditioned == 1) {
+    i2c_regs[STATUS] |= bit(1); // set the i2c register bit for conditioned chip
+  } else {
+    // The EEPROM is a maiden, load standard settings to RAM again
+    EEPROMVar initialVar;
+    eepromVar = initialVar;
+  }
+  // copy the variables from EEPROM to the i2c regs
+  i2c_regs[V1VREF_LO] = lowByte(eepromVar.v1v_ref);
+  i2c_regs[V1VREF_HI] = highByte(eepromVar.v1v_ref);
+  i2c_regs[VCCMIN_LO] = lowByte(eepromVar.vcc_min);
+  i2c_regs[VCCMIN_HI] = highByte(eepromVar.vcc_min);
+  i2c_regs[VCCMAX_LO] = lowByte(eepromVar.vcc_max);
+  i2c_regs[VCCMAX_HI] = highByte(eepromVar.vcc_max);
+  i2c_regs[VCCHYST_LO] = lowByte(eepromVar.vcc_hyst);
+  i2c_regs[VCCHYST_HI] = highByte(eepromVar.vcc_hyst);
+}
+
+void writeEEPROM() {
+  // write to EEPROM if we received new data
+  if (eepromVar.conditioned == 2) {
+    eepromVar.conditioned = 1;
+    eepromVar.v1v_ref = (i2c_regs[V1VREF_HI] << 8) |  i2c_regs[V1VREF_LO];
+    eepromVar.vcc_min = (i2c_regs[VCCMIN_HI] << 8) |  i2c_regs[VCCMIN_LO];
+    eepromVar.vcc_max = (i2c_regs[VCCMAX_HI] << 8) |  i2c_regs[VCCMAX_LO];
+    eepromVar.vcc_hyst = (i2c_regs[VCCHYST_HI] << 8) |  i2c_regs[VCCHYST_LO];
+    EEPROM.put(0, eepromVar);
   }
 }
 
 void activeSleepNow() {
+  // write data to EEPROM if necessary
+  writeEEPROM();
   // consume some power to reduce battery voltage
-  while (i2c_regs[1] != 0) {
+  while (i2c_regs[SLEEP] != 0) {
     digitalWrite( PB3, LOW );  // disable 3.3V
     delay(8000);  // ms
-    i2c_regs[1]--;  // decrease the sleep register (WDog firing counter).
+    i2c_regs[SLEEP]--;  // decrease the sleep register (WDog firing counter).
   }
 }
 
@@ -83,6 +146,9 @@ void sleepNow() {
   convertVCC = true;                      // the voltage needs to be measured when we wake up
   saveADCSRA = ADCSRA;                    // save the state of the ADC.
   ADCSRA = 0;                             // turn off the ADC
+
+  writeEEPROM();                          // write data to EEPROM if necessary
+
   power_all_disable ();                   // turn power off to ADC, TIMER 1 and 2, Serial Interface
   
   noInterrupts();                         // turn off interrupts as a precaution
@@ -111,7 +177,7 @@ bool VCCconversionInProgress() {
 uint16_t getVCC() {
   uint8_t low = ADCL;
   uint16_t val = (ADCH << 8) | low;
-  return ((uint32_t)1024 * V1V1REF) / val;
+  return ((uint32_t)1024 * eepromVar.v1v_ref) / val;
 }
 
 /**
@@ -126,7 +192,7 @@ void requestEvent()
   reg_position++;
   if (reg_position >= reg_size)
   {
-      reg_position = 0;
+    reg_position = 0;
   }
 }
 
@@ -154,8 +220,11 @@ void receiveEvent(uint8_t howMany)
     return;
   }
   while(howMany--) {
-    // I2C master is just allowed to write the second register
-    if (reg_position == 1) {
+    // I2C master is just allowed to write some registers
+    if (reg_position >= SLEEP) {
+      i2c_regs[reg_position] = TinyWireS.receive();
+    } else if ((reg_position >= V1VREF_LO) && (reg_position <= VCCHYST_HI)) {
+      eepromVar.conditioned = 2;
       i2c_regs[reg_position] = TinyWireS.receive();
     }
     reg_position++;
@@ -186,10 +255,12 @@ void setup() {
   #else
     ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);  // For ATmega328
   #endif
-  // delay( 2 );
 
   // set sleep mode Power Down
   set_sleep_mode ( SLEEP_MODE_PWR_DOWN );
+
+  // read EEPROM
+  readEEPROM();
 
   // set Timer1 to trigger the ADC conversion every 500ms
   // 243 = 8,000,000 / (16384 * 2) - 1
@@ -210,10 +281,10 @@ void setup() {
 }
 
 void loop() {
-  if ( i2c_regs[1] != 0 ) {
+  if (i2c_regs[SLEEP] != 0) {
     // go to sleep if the sleep register is not zero
     //blink(1);
-    if (vcc > VCCMAX) {
+    if (vcc > eepromVar.vcc_max) {
       activeSleepNow();  // consume some power to reduce battery voltage
     } else {
       sleepNow();  // enter sleep mode
@@ -229,15 +300,15 @@ void loop() {
     vcc = getVCC();
     readVCC = false;  // we don't need to read it again if there was no convertion
 
-    if ( vcc <= VCCHYST ) {
+    if ( vcc <= eepromVar.vcc_hyst ) {
       // enable battery charging if voltage is too low
       digitalWrite( PB4, HIGH );
-    } else if ( vcc >= VCCMAX ) {
+    } else if ( vcc >= eepromVar.vcc_max ) {
       // disable battery charging if voltage is too high
       digitalWrite( PB4, LOW );
     }
 
-    if ( vcc < VCCMIN ) {
+    if ( vcc < eepromVar.vcc_min ) {
       // if the voltage is to low
       //blink(2);
       sleepNow();  // then set up and enter sleep mode
@@ -247,9 +318,9 @@ void loop() {
       digitalWrite( PB3, HIGH );  // enable 3.3V
 
       // write the voltage to the I2C registers
-      i2c_regs[2] = lowByte(vcc);
-      i2c_regs[3] = highByte(vcc);
-      i2c_regs[0]++;
+      i2c_regs[VCC_LO] = lowByte(vcc);
+      i2c_regs[VCC_HI] = highByte(vcc);
+      i2c_regs[STATUS] |= bit(0);  // we have a measurement - set the first bit of the STATUS register
     }
   }
   //TinyWireS_stop_check();
@@ -258,8 +329,8 @@ void loop() {
 
 ISR( WDT_vect ) {  // will enter this if watch dog is timed out
   wdt_disable();  // until next time....
-  if (i2c_regs[1] != 0) {
-    i2c_regs[1]--;  // decrease the sleep register (WDog firing counter).
+  if (i2c_regs[SLEEP] != 0) {
+    i2c_regs[SLEEP]--;  // decrease the sleep register (WDog firing counter).
   }
 } 
 

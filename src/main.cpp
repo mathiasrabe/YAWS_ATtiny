@@ -221,7 +221,7 @@ void receiveEvent(uint8_t howMany)
   }
   while(howMany--) {
     // I2C master is just allowed to write some registers
-    if (reg_position >= SLEEP) {
+    if (reg_position == SLEEP) {
       i2c_regs[reg_position] = TinyWireS.receive();
     } else if ((reg_position >= V1VREF_LO) && (reg_position <= VCCHYST_HI)) {
       eepromVar.conditioned = 2;
@@ -297,7 +297,14 @@ void loop() {
     readVCC = true;  // VCC needs to be read after conversion
   }
   if (!VCCconversionInProgress() && readVCC) {
-    vcc = getVCC();
+    uint16_t vcc_buf = getVCC();
+    // check if the value is plausible
+    if ((vcc_buf > 1800) && (vcc_buf < 5500)) {
+      vcc = vcc_buf;
+    } else {
+      convertVCC = true;
+      goto i2c_state_check;
+    }
     readVCC = false;  // we don't need to read it again if there was no convertion
 
     if ( vcc <= eepromVar.vcc_hyst ) {
@@ -323,6 +330,7 @@ void loop() {
       i2c_regs[STATUS] |= bit(0);  // we have a measurement - set the first bit of the STATUS register
     }
   }
+  i2c_state_check:
   //TinyWireS_stop_check();
   TinyWireS.stateCheck();
 }

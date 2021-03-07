@@ -186,7 +186,6 @@ uint16_t getVCC() {
  */
 void requestEvent()
 {
-  digitalWrite( PB1, HIGH );
   TinyWireS.send(i2c_regs[reg_position]);
   // Increment the reg position on each read, and loop back to zero
   reg_position++;
@@ -283,7 +282,6 @@ void setup() {
 void loop() {
   if (i2c_regs[SLEEP] != 0) {
     // go to sleep if the sleep register is not zero
-    //blink(1);
     if (vcc > eepromVar.vcc_max) {
       activeSleepNow();  // consume some power to reduce battery voltage
     } else {
@@ -317,11 +315,9 @@ void loop() {
 
     if ( vcc < eepromVar.vcc_min ) {
       // if the voltage is to low
-      //blink(2);
       sleepNow();  // then set up and enter sleep mode
       return;
     } else {
-      //blink(3);
       digitalWrite( PB3, HIGH );  // enable 3.3V
 
       // write the voltage to the I2C registers
